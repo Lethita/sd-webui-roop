@@ -1,4 +1,7 @@
+import imghdr
 import os
+import random
+
 import gradio as gr
 import modules.scripts as scripts
 from modules.upscaler import Upscaler, UpscalerData
@@ -35,7 +38,11 @@ class FaceSwapScript(scripts.Script):
     def ui(self, is_img2img):
         with gr.Accordion(f"roop {version_flag}", open=False):
             with gr.Column():
-                img = gr.inputs.Image(type="pil")
+                with gr.Tabs():
+                    with gr.Tab("Single Image"):
+                        img = gr.inputs.Image(type="pil")
+                    with gr.Tab("Batch"):
+                        img_dir = gr.inputs.Textbox(type="text", label="Image directory")
                 enable = gr.Checkbox(False, placeholder="enable", label="Enable")
                 faces_index = gr.Textbox(
                     value="0",
@@ -90,6 +97,7 @@ class FaceSwapScript(scripts.Script):
 
         return [
             img,
+            img_dir,
             enable,
             faces_index,
             model,
@@ -127,21 +135,23 @@ class FaceSwapScript(scripts.Script):
         )
 
     def process(
-        self,
-        p: StableDiffusionProcessing,
-        img,
-        enable,
-        faces_index,
-        model,
-        face_restorer_name,
-        face_restorer_visibility,
-        upscaler_name,
-        upscaler_scale,
-        upscaler_visibility,
-        swap_in_source,
-        swap_in_generated,
+            self,
+            p: StableDiffusionProcessing,
+            img,
+            img_dir,
+            enable,
+            faces_index,
+            model,
+            face_restorer_name,
+            face_restorer_visibility,
+            upscaler_name,
+            upscaler_scale,
+            upscaler_visibility,
+            swap_in_source,
+            swap_in_generated,
     ):
         self.source = img
+        self.source_dir = img_dir
         self.face_restorer_name = face_restorer_name
         self.upscaler_scale = upscaler_scale
         self.upscaler_visibility = upscaler_visibility
@@ -155,40 +165,58 @@ class FaceSwapScript(scripts.Script):
         }
         if len(self.faces_index) == 0:
             self.faces_index = {0}
-        if self.enable:
-            if self.source is not None:
-                if isinstance(p, StableDiffusionProcessingImg2Img) and swap_in_source:
-                    logger.info(f"roop enabled, face index %s", self.faces_index)
 
-                    for i in range(len(p.init_images)):
-                        logger.info(f"Swap in source %s", i)
-                        result = swap_face(
-                            self.source,
-                            p.init_images[i],
-                            faces_index=self.faces_index,
-                            model=self.model,
-                            upscale_options=self.upscale_options,
-                        )
-                        p.init_images[i] = result.image()
-            else:
-                logger.error(f"Please provide a source face")
+        image_list = []
+        if img_dir:
+            if not os.path.isdir(img_dir):
+                logger.error("Input Image directory Error")
+                return
+            for i in os.listdir(img_dir):
+                temp_image = os.path.join(img_dir, i)
+                if not imghdr.what(temp_image):
+                    continue
+                image_list.append(Image.open(temp_image))
+        self.source_list = image_list
+
+        if not self.enable:
+            return
+
+        if not (isinstance(p, StableDiffusionProcessingImg2Img) and swap_in_source):
+            return
+
+        if self.source_list or self.source:
+            for i in range(len(p.init_images)):
+                source_img = random.choice(self.source_list) if self.source_list else self.source
+                logger.info(f"Swap in source %s", i)
+                result = swap_face(
+                    source_img,
+                    p.init_images[i],
+                    faces_index=self.faces_index,
+                    model=self.model,
+                    upscale_options=self.upscale_options,
+                )
+                p.init_images[i] = result.image()
+        else:
+            logger.error(f"Please provide a source face")
 
     def postprocess_batch(self, *args, **kwargs):
         if self.enable:
             return images
 
     def postprocess_image(self, p, script_pp: scripts.PostprocessImageArgs, *args):
-        if self.enable and self.swap_in_generated:
-            if self.source is not None:
-                image: Image.Image = script_pp.image
-                result: ImageResult = swap_face(
-                    self.source,
-                    image,
-                    faces_index=self.faces_index,
-                    model=self.model,
-                    upscale_options=self.upscale_options,
-                )
-                pp = scripts_postprocessing.PostprocessedImage(result.image())
-                pp.info = {}
-                p.extra_generation_params.update(pp.info)
-                script_pp.image = pp.image
+        if not (self.enable and self.swap_in_generated):
+            return
+
+        source_img = random.choice(self.source_list) if self.source_list else self.source
+        image: Image.Image = script_pp.image
+        result: ImageResult = swap_face(
+            source_img,
+            image,
+            faces_index=self.faces_index,
+            model=self.model,
+            upscale_options=self.upscale_options,
+        )
+        pp = scripts_postprocessing.PostprocessedImage(result.image())
+        pp.info = {}
+        p.extra_generation_params.update(pp.info)
+        script_pp.image = pp.image
